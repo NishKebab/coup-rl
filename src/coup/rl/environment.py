@@ -61,6 +61,11 @@ class CoupEnvironment(AECEnv):
         self.pending_target = None
         self.action_history = []
         
+        # Fixed environment additions
+        self.awaiting_target = False
+        self.pending_targeted_action = None
+        self.pending_actor = None
+        
         # Initialize info dicts
         self.infos = {agent: {} for agent in self.agents}
         
@@ -137,6 +142,11 @@ class CoupEnvironment(AECEnv):
         self.pending_target = None
         self.action_history = []
         
+        # Reset fixed environment variables
+        self.awaiting_target = False
+        self.pending_targeted_action = None
+        self.pending_actor = None
+        
         # Return initial observations
         observations = {agent: self._get_observation(agent) for agent in self.agents}
         return observations
@@ -181,7 +191,7 @@ class CoupEnvironment(AECEnv):
             self._handle_main_action(agent, action)
     
     def _handle_main_action(self, agent: str, action: int) -> None:
-        """Handle main game actions."""
+        """Handle main game actions with proper targeting."""
         player_idx = self.agent_name_mapping[agent]
         
         # Only current player can take main actions
@@ -190,18 +200,19 @@ class CoupEnvironment(AECEnv):
         
         if action < 7:  # Basic actions
             action_type = list(ActionType)[action]
-            target = None
             
             # Handle targeted actions
             if action_type in [ActionType.COUP, ActionType.ASSASSINATE, ActionType.STEAL]:
-                # Need to wait for target selection
-                self.pending_action = action_type
+                # Store the action and wait for target
+                self.awaiting_target = True
+                self.pending_targeted_action = action_type
+                self.pending_actor = agent
                 return
             
-            result = self.game.attempt_action(action_type, target)
-            self._record_action(agent, action_type, target, result)
+            # Execute non-targeted actions
+            result = self.game.attempt_action(action_type, None)
+            self._record_action(agent, action_type, None, result)
             
-            # Check if challenge/block window opened
             if self.game.state.challenge_window_open:
                 self.challenge_phase = True
             elif self.game.state.block_window_open:
@@ -210,22 +221,39 @@ class CoupEnvironment(AECEnv):
                 self.game.resolve_pending_action()
         
         elif 7 <= action <= 12:  # Target selection
-            if self.pending_action:
+            if self.awaiting_target and self.pending_targeted_action:
                 target_idx = action - 7
                 if target_idx < len(self.game.state.players):
                     target = self.game.state.players[target_idx]
                     
-                    result = self.game.attempt_action(self.pending_action, target)
-                    self._record_action(agent, self.pending_action, target, result)
-                    
-                    if self.game.state.challenge_window_open:
-                        self.challenge_phase = True
-                    elif self.game.state.block_window_open:
-                        self.block_phase = True
-                    else:
-                        self.game.resolve_pending_action()
+                    # Don't target self or eliminated players
+                    if target != self.game.state.players[player_idx] and not target.is_eliminated:
+                        result = self.game.attempt_action(self.pending_targeted_action, target)
+                        self._record_action(agent, self.pending_targeted_action, target, result)
+                        
+                        # Handle card loss for coup/assassinate
+                        if self.pending_targeted_action in [ActionType.COUP, ActionType.ASSASSINATE]:
+                            if result.success:
+                                self._force_card_loss(target)
+                        
+                        if self.game.state.challenge_window_open:
+                            self.challenge_phase = True
+                        elif self.game.state.block_window_open:
+                            self.block_phase = True
+                        else:
+                            self.game.resolve_pending_action()
                 
-                self.pending_action = None
+                # Reset targeting state
+                self.awaiting_target = False
+                self.pending_targeted_action = None
+                self.pending_actor = None
+            
+        elif action == 15:  # Pass
+            if self.awaiting_target:
+                # Cancel targeting
+                self.awaiting_target = False
+                self.pending_targeted_action = None
+                self.pending_actor = None
     
     def _handle_challenge_action(self, agent: str, action: int) -> None:
         """Handle challenge phase actions."""
@@ -334,6 +362,65 @@ class CoupEnvironment(AECEnv):
             obs.extend([0.5, 0.5, 0.5])  # challenge_success_rate, block_success_rate, estimated_bluff_rate
         
         return np.array(obs, dtype=np.float32)
+    
+    def _force_card_loss(self, target_player):
+        """Force a player to lose a card (for coup/assassinate)."""
+        if not target_player.is_eliminated and len(target_player.cards) > 0:
+            # Remove a random card (in real game, player chooses)
+            card_to_lose = target_player.cards[0]
+            target_player.lose_card(card_to_lose.character)
+            print(f"  🎯 {target_player.name} lost {card_to_lose.character.value}")
+            
+            # Check if player is eliminated
+            if len(target_player.cards) == 0:
+                target_player.is_eliminated = True
+                print(f"  💀 {target_player.name} eliminated!")
+    
+    def get_valid_actions(self, agent: str) -> List[int]:
+        """Get valid actions for current state."""
+        player_idx = self.agent_name_mapping[agent]
+        player = self.game.state.players[player_idx]
+        
+        if player.is_eliminated:
+            return [15]  # Only pass
+        
+        valid_actions = []
+        
+        if self.awaiting_target and agent == self.pending_actor:
+            # Must select target
+            for i, target in enumerate(self.game.state.players):
+                if i != player_idx and not target.is_eliminated:
+                    valid_actions.append(7 + i)
+            valid_actions.append(15)  # Can pass to cancel
+            return valid_actions
+        
+        if self.challenge_phase:
+            if player_idx != self.game.state.current_player_index:
+                valid_actions.extend([13, 15])  # Challenge or pass
+            else:
+                valid_actions.append(15)  # Only pass
+        elif self.block_phase:
+            # Any player can potentially block
+            valid_actions.extend([14, 15])  # Block or pass
+        else:
+            if player_idx == self.game.state.current_player_index:
+                # Main actions
+                valid_actions.extend([0, 1])  # Income, Foreign Aid
+                
+                # Coup if enough coins
+                if player.coins >= 7:
+                    valid_actions.append(2)  # Coup
+                
+                # Character actions (may be bluffs)
+                valid_actions.extend([3, 4, 5, 6])  # Tax, Assassinate, Exchange, Steal
+                
+                # Forced coup at 10+ coins
+                if player.coins >= 10:
+                    valid_actions = [2]  # Must coup
+            else:
+                valid_actions.append(15)  # Only pass
+        
+        return valid_actions if valid_actions else [15]
     
     def _select_next_agent(self) -> None:
         """Select the next agent to act."""
