@@ -1,0 +1,10 @@
+2025-07-08 07:04:07,019 - coup.rl.training - INFO - Initialized 4 main agents and 8 pool agents
+2025-07-08 07:04:07,020 - coup.rl.training - INFO - Starting training for 1000 episodes
+2025-07-08 07:04:07,191 - coup.rl.training - INFO - Starting evaluation with 50 episodes
+2025-07-08 07:04:12,389 - coup.rl.training - INFO - Evaluation completed
+2025-07-08 07:04:12,433 - coup.rl.training - INFO - Checkpoint saved at episode 0
+2025-07-08 07:04:24,063 - coup.rl.training - INFO - Starting evaluation with 50 episodes
+2025-07-08 07:04:48,295 - coup.rl.training - INFO - Evaluation completed
+2025-07-08 07:05:02,860 - coup.rl.training - INFO - Starting evaluation with 50 episodes
+2025-07-08 07:05:27,257 - coup.rl.training - INFO - Evaluation completed
+2025-07-08 07:05:42,435 - coup.rl.training - INFO - Starting evaluation with 50 episodes
